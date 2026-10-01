@@ -1,4 +1,4 @@
-# Wbesite-uptime-monitor
+# Website-uptime-monitor
  
 > 🌍 **Select your language / Choisissez votre langue / Sprache wählen**
  
