@@ -34,6 +34,9 @@ jobs:
       - name: Terraform init
         run: terraform init
 
+      - name: Terraform format correction
+        run: terraform fmt 
+
       - name: Terraform format check
         run: terraform fmt -check
 
