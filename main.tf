@@ -1,4 +1,11 @@
 terraform {
+  required_version = "1.16.5"
+  cloud {
+    organization = "Dominionorg"
+    workspaces {
+      name = "Website-uptime-monitoring"
+    }
+  }
   required_providers {
     aws = {
       source  = "hashicorp/aws"
