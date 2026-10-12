@@ -5,7 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-
+  workflow_dispatch:
+    
 env:
   TF_VERSION: "1.16.5"
   AWS_REGION: eu-west-1
@@ -89,3 +90,31 @@ jobs:
           echo "Lambda test passed!"
         env:
           AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
+
+  terraform-destroy:
+    name: teraform destroy
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Terraform setup
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        run: terraform init
+
+      - name: Terraform Destroy
+        run: terraform Destroy -auto-approve
