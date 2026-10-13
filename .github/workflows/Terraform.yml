@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-    
+
 env:
   TF_VERSION: "1.16.5"
   AWS_REGION: eu-west-1
@@ -117,4 +117,4 @@ jobs:
         run: terraform init
 
       - name: Terraform Destroy
-        run: terraform Destroy -auto-approve
+        run: terraform destroy -auto-approve
