@@ -105,7 +105,7 @@ jobs:
   terraform-approval:
     name: Manual Approval
     runs-on: ubuntu-latest
-    needs: terraform-security
+    needs: terraform-validate
     if: >-
       github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment: production
