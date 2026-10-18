@@ -2,83 +2,180 @@ name: Terraform CI/CD
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+
   pull_request:
-    branches: [main]
+    branches:
+      - main
+
   workflow_dispatch:
+    inputs:
+      action:
+        description: "Operation to perform"
+        required: true
+        type: choice
+        options:
+          - destroy
+          - deploy
+        default: deploy
+
+permissions:
+  contents: read
 
 env:
   TF_VERSION: "1.16.5"
-  AWS_REGION: eu-west-1
+  AWS_REGION: "eu-west-1"
 
 jobs:
-  terraform-validate:
-    name: Validate + Plan
+  terraform-security:
+    name: Security & Quality
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Terraform Setup
-        uses: hashicorp/setup-terraform@v3
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
         with:
-          terraform_version: ${{ env.TF_VERSION }}
-          cli_config_credentials_token : ${{ secrets.TF_API_TOKEN }}
+          tflint_version: v0.50.0
 
-      - name: AWS credentials configuration
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Initialize TFLint
+        run: tflint --init
+
+      - name: Run TFLint
+        run: tflint
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@master
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          directory: .
+          framework: terraform
+          soft_fail: true
 
-      - name: Terraform init
-        run: terraform init
-
-      - name: Terraform format correction
-        run: terraform fmt 
-
-      - name: Terraform format check
-        run: terraform fmt -check
-
-      - name: Terraform validate
-        run: terraform validate
-
-      - name: Terraform plan
-        if: github.event_name == 'pull_request'
-        run: terraform plan -no-color
-
-  deploy:
-    name: Deploy to AWS
+  terraform-validate:
+    name: Terraform Validate, Cost Control & Plan
     runs-on: ubuntu-latest
-    needs: terraform-validate
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: terraform-security
+    if: github.event_name == 'pull_request'
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
-          cli_config_credentials_token : ${{ secrets.TF_API_TOKEN }}
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
 
-      - name: AWS credentials
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Terraform init
+      - name: Terraform Init
         run: terraform init
 
-      - name: Terraform apply
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan -no-color
+
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      - name: Infracost Estimation
+        run: |
+          infracost breakdown --path . \
+            --format table \
+            --out-file infracost.txt
+          cat infracost.txt
+
+  terraform-approval:
+    name: Manual Approval
+    runs-on: ubuntu-latest
+    needs: terraform-security
+    if: >-
+      (github.ref == 'refs/heads/main' &&
+      github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' &&
+      inputs.action == 'deploy')
+    environment: production
+
+    steps:
+      - name: Approval
+        run: echo "Approval to production granted. Ready to deploy."
+
+  terraform-deploy:
+    name: Deploy to AWS
+    runs-on: ubuntu-latest
+    needs: terraform-approval
+    if: >-
+      (github.ref == 'refs/heads/main' &&
+      github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' &&
+      inputs.action == 'deploy')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Apply
         run: terraform apply -auto-approve
 
-      - name: Test Lambda function
+  terraform-test-backup:
+    name: Terraform Post-Deployment Tests
+    runs-on: ubuntu-latest
+    needs: terraform-deploy
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        run: terraform init
+
+      # Test 1 : Invocation Lambda monitor
+      - name: Test Lambda monitor
         run: |
           aws lambda invoke \
             --function-name uptime-monitor-checker \
@@ -87,33 +184,78 @@ jobs:
             response.json
 
           cat response.json
-          echo "Lambda test passed!"
-        env:
-          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
+
+          MONITORED=$(python3 -c \
+            "import json; print(json.load(open('response.json'))['monitored'])")
+
+          if [ "$MONITORED" -lt 1 ]; then
+            echo "Lambda monitored 0 sites"
+            exit 1
+          fi
+
+          echo "Lambda monitored $MONITORED sites"
+
+      # Test 2 : Résultats dans DynamoDB
+      - name: Verify DynamoDB results
+        run: |
+          sleep 10
+
+          COUNT=$(aws dynamodb scan \
+            --table-name uptime-monitor-results \
+            --select COUNT \
+            --query 'Count' \
+            --output text)
+
+          if [ "$COUNT" -lt 1 ]; then
+            echo "No results in DynamoDB"
+            exit 1
+          fi
+
+          echo "$COUNT results in DynamoDB"
+
+      # Test 3 : EventBridge rule active
+      - name: Verify EventBridge rule
+        run: |
+          STATE=$(aws events describe-rule \
+            --name uptime-monitor-trigger \
+            --query 'State' \
+            --output text)
+
+          if [ "$STATE" != "ENABLED" ]; then
+            echo "EventBridge rule not enabled"
+            exit 1
+          fi
+
+          echo "EventBridge rule active"
 
   terraform-destroy:
-    name: teraform destroy
+    name: Destroy Infrastructure
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
+
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.action == 'destroy'
+
+    environment: production
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Terraform setup
+      - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
           cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
 
-      - name: AWS credentials
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Terraform init
+      - name: Terraform Init
         run: terraform init
 
       - name: Terraform Destroy
